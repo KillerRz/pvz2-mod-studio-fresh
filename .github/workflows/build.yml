@@ -1,0 +1,480 @@
+name: Build PvZ2 Mod Studio
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: starter-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up pinned Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      - name: Install Android SDK components
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      - name: Generate starter project
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from textwrap import dedent
+
+          files = {
+              "settings.gradle.kts": r'''
+                  pluginManagement {
+                      repositories {
+                          google()
+                          mavenCentral()
+                          gradlePluginPortal()
+                      }
+                  }
+
+                  dependencyResolutionManagement {
+                      repositoriesMode.set(
+                          RepositoriesMode.FAIL_ON_PROJECT_REPOS
+                      )
+                      repositories {
+                          google()
+                          mavenCentral()
+                      }
+                  }
+
+                  rootProject.name = "PvZ2ModStudio"
+                  include(":app")
+              ''',
+
+              "build.gradle.kts": r'''
+                  plugins {
+                      id("com.android.application") version "8.9.2" apply false
+                      id("org.jetbrains.kotlin.android") version "2.1.20" apply false
+                      id("org.jetbrains.kotlin.plugin.compose") version "2.1.20" apply false
+                  }
+              ''',
+
+              "gradle.properties": r'''
+                  org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+                  android.useAndroidX=true
+                  kotlin.code.style=official
+              ''',
+
+              "app/build.gradle.kts": r'''
+                  plugins {
+                      id("com.android.application")
+                      id("org.jetbrains.kotlin.android")
+                      id("org.jetbrains.kotlin.plugin.compose")
+                  }
+
+                  android {
+                      namespace = "com.example.pvz2modstudio"
+                      compileSdk = 35
+
+                      defaultConfig {
+                          applicationId = "com.example.pvz2modstudio"
+                          minSdk = 26
+                          targetSdk = 35
+                          versionCode = 1
+                          versionName = "0.1.0"
+                      }
+
+                      buildFeatures {
+                          compose = true
+                      }
+
+                      compileOptions {
+                          sourceCompatibility = JavaVersion.VERSION_17
+                          targetCompatibility = JavaVersion.VERSION_17
+                      }
+                  }
+
+                  kotlin {
+                      jvmToolchain(17)
+                  }
+
+                  dependencies {
+                      implementation("androidx.core:core-ktx:1.15.0")
+                      implementation("androidx.activity:activity-compose:1.10.1")
+
+                      implementation(
+                          platform("androidx.compose:compose-bom:2025.03.00")
+                      )
+                      implementation("androidx.compose.ui:ui")
+                      implementation("androidx.compose.foundation:foundation")
+                      implementation("androidx.compose.material3:material3")
+
+                      implementation("dev.rikka.shizuku:api:13.1.5")
+                      implementation("dev.rikka.shizuku:provider:13.1.5")
+                  }
+              ''',
+
+              "app/src/main/AndroidManifest.xml": r'''
+                  <?xml version="1.0" encoding="utf-8"?>
+                  <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+                      <uses-permission
+                          android:name="moe.shizuku.manager.permission.API_V23" />
+
+                      <application
+                          android:allowBackup="false"
+                          android:label="PvZ2 Mod Studio"
+                          android:supportsRtl="true"
+                          android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+                          <meta-data
+                              android:name="moe.shizuku.client.V3_SUPPORT"
+                              android:value="true" />
+
+                          <provider
+                              android:name="rikka.shizuku.ShizukuProvider"
+                              android:authorities="${applicationId}.shizuku"
+                              android:multiprocess="false"
+                              android:enabled="true"
+                              android:exported="true"
+                              android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
+                          <activity
+                              android:name=".MainActivity"
+                              android:exported="true">
+                              <intent-filter>
+                                  <action android:name="android.intent.action.MAIN" />
+                                  <category android:name="android.intent.category.LAUNCHER" />
+                              </intent-filter>
+                          </activity>
+
+                      </application>
+                  </manifest>
+              ''',
+
+              "app/src/main/java/com/example/pvz2modstudio/MainActivity.kt": r'''
+                  package com.example.pvz2modstudio
+
+                  import android.content.pm.PackageManager
+                  import android.os.Bundle
+                  import androidx.activity.ComponentActivity
+                  import androidx.activity.compose.setContent
+                  import androidx.compose.foundation.layout.*
+                  import androidx.compose.foundation.rememberScrollState
+                  import androidx.compose.foundation.verticalScroll
+                  import androidx.compose.material3.*
+                  import androidx.compose.runtime.*
+                  import androidx.compose.ui.Modifier
+                  import androidx.compose.ui.unit.dp
+                  import rikka.shizuku.Shizuku
+
+                  class MainActivity : ComponentActivity() {
+
+                      private var status by mutableStateOf("Checking connection...")
+                      private var connected by mutableStateOf(false)
+                      private var authorized by mutableStateOf(false)
+
+                      private val binderReceived =
+                          Shizuku.OnBinderReceivedListener {
+                              refreshStatus()
+                          }
+
+                      private val binderDead =
+                          Shizuku.OnBinderDeadListener {
+                              refreshStatus()
+                          }
+
+                      private val permissionResult =
+                          Shizuku.OnRequestPermissionResultListener { _, _ ->
+                              refreshStatus()
+                          }
+
+                      override fun onCreate(savedInstanceState: Bundle?) {
+                          super.onCreate(savedInstanceState)
+
+                          setContent {
+                              MaterialTheme {
+                                  Scaffold { insets ->
+                                      Column(
+                                          modifier = Modifier
+                                              .fillMaxSize()
+                                              .padding(insets)
+                                              .verticalScroll(rememberScrollState())
+                                              .padding(24.dp),
+                                          verticalArrangement =
+                                              Arrangement.spacedBy(16.dp)
+                                      ) {
+                                          Text(
+                                              "PvZ2 Mod Studio",
+                                              style = MaterialTheme.typography.headlineLarge
+                                          )
+
+                                          Text(
+                                              "Version 0.1.0 - connection diagnostics",
+                                              style = MaterialTheme.typography.titleMedium
+                                          )
+
+                                          Card(
+                                              modifier = Modifier.fillMaxWidth()
+                                          ) {
+                                              Column(
+                                                  modifier = Modifier.padding(20.dp),
+                                                  verticalArrangement =
+                                                      Arrangement.spacedBy(12.dp)
+                                              ) {
+                                                  Text(
+                                                      "Shizuku connection",
+                                                      style = MaterialTheme.typography.titleLarge
+                                                  )
+
+                                                  Text(status)
+
+                                                  Button(
+                                                      onClick = { requestAccess() },
+                                                      enabled = connected && !authorized
+                                                  ) {
+                                                      Text("Authorize Shizuku")
+                                                  }
+
+                                                  OutlinedButton(
+                                                      onClick = { refreshStatus() }
+                                                  ) {
+                                                      Text("Check again")
+                                                  }
+                                              }
+                                          }
+
+                                          Card(
+                                              modifier = Modifier.fillMaxWidth()
+                                          ) {
+                                              Column(
+                                                  modifier = Modifier.padding(20.dp),
+                                                  verticalArrangement =
+                                                      Arrangement.spacedBy(12.dp)
+                                              ) {
+                                                  Text(
+                                                      "Your game is untouched",
+                                                      style = MaterialTheme.typography.titleLarge
+                                                  )
+
+                                                  Text(
+                                                      "This starter does not open, modify, " +
+                                                      "delete, or change permissions on " +
+                                                      "any game files."
+                                                  )
+
+                                                  Text(
+                                                      "Shizuku authorization is not proof " +
+                                                      "of access to the game's folder. " +
+                                                      "That requires a separate test."
+                                                  )
+                                              }
+                                          }
+
+                                          Text(
+                                              "Setup",
+                                              style = MaterialTheme.typography.titleLarge
+                                          )
+
+                                          Text(
+                                              "1. Install and start the official Shizuku app.\n\n" +
+                                              "2. Return here and tap Check again.\n\n" +
+                                              "3. Tap Authorize Shizuku and approve " +
+                                              "the permission request."
+                                          )
+
+                                          HorizontalDivider()
+
+                                          Text(
+                                              "Next milestone: a read-only game-folder " +
+                                              "access test, followed by verified backups."
+                                          )
+                                      }
+                                  }
+                              }
+                          }
+
+                          Shizuku.addBinderReceivedListenerSticky(binderReceived)
+                          Shizuku.addBinderDeadListener(binderDead)
+                          Shizuku.addRequestPermissionResultListener(permissionResult)
+                          refreshStatus()
+                      }
+
+                      override fun onResume() {
+                          super.onResume()
+                          refreshStatus()
+                      }
+
+                      private fun refreshStatus() {
+                          runOnUiThread {
+                              try {
+                                  connected = Shizuku.pingBinder()
+                                  authorized = connected &&
+                                      Shizuku.checkSelfPermission() ==
+                                      PackageManager.PERMISSION_GRANTED
+
+                                  status = when {
+                                      !connected ->
+                                          "Not connected. Start Shizuku, then check again."
+
+                                      !authorized ->
+                                          "Connected. Permission is required."
+
+                                      else ->
+                                          "Connected and authorized. " +
+                                          "Game-folder access has not been tested."
+                                  }
+                              } catch (error: Exception) {
+                                  connected = false
+                                  authorized = false
+                                  status = "Connection check failed: " +
+                                      (error.message ?: error.javaClass.simpleName)
+                              }
+                          }
+                      }
+
+                      private fun requestAccess() {
+                          try {
+                              if (!Shizuku.pingBinder()) {
+                                  refreshStatus()
+                                  return
+                              }
+
+                              if (
+                                  Shizuku.checkSelfPermission() ==
+                                  PackageManager.PERMISSION_GRANTED
+                              ) {
+                                  refreshStatus()
+                                  return
+                              }
+
+                              if (Shizuku.shouldShowRequestPermissionRationale()) {
+                                  status =
+                                      "Permission was previously denied. " +
+                                      "Open Shizuku and review this app under " +
+                                      "its authorized applications."
+                                  return
+                              }
+
+                              Shizuku.requestPermission(100)
+                          } catch (error: Exception) {
+                              status = "Permission request failed: " +
+                                  (error.message ?: error.javaClass.simpleName)
+                          }
+                      }
+
+                      override fun onDestroy() {
+                          Shizuku.removeBinderReceivedListener(binderReceived)
+                          Shizuku.removeBinderDeadListener(binderDead)
+                          Shizuku.removeRequestPermissionResultListener(permissionResult)
+                          super.onDestroy()
+                      }
+                  }
+              ''',
+
+              ".gitignore": r'''
+                  .gradle/
+                  .kotlin/
+                  .idea/
+                  local.properties
+                  **/build/
+                  *.jks
+                  *.keystore
+              ''',
+
+              "README.md": r'''
+                  # PvZ2 Mod Studio - Starter
+
+                  Unofficial diagnostic Android application.
+                  Not affiliated with EA or PopCap.
+
+                  ## Implemented
+                  - Jetpack Compose interface
+                  - Shizuku connection checks
+                  - Shizuku authorization requests
+                  - Binder lifecycle listeners
+
+                  ## Not implemented
+                  - Privileged filesystem operations
+                  - Game-folder access testing
+                  - Backups or restoration
+                  - RTON parsing or editing
+                  - Profile editing or presets
+
+                  This starter does not access or modify game files.
+
+                  ## Build
+                  Use Java 17 and an Android SDK containing API 35.
+                  Run: ./gradlew :app:assembleDebug
+
+                  ## Signing
+                  CI uses a temporary debug signing key.
+                  Separate builds may not install over one another.
+                  Configure persistent signing before regular releases.
+              '''
+          }
+
+          root = Path("studio")
+          for name, content in files.items():
+              destination = root / name
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              destination.write_text(
+                  dedent(content).lstrip(),
+                  encoding="utf-8"
+              )
+
+          print(f"Created {len(files)} starter files.")
+          PY
+
+      - name: Generate Gradle Wrapper
+        working-directory: studio
+        run: |
+          gradle --no-daemon wrapper \
+            --gradle-version 8.11.1 \
+            --distribution-type bin
+
+      - name: Build debug APK
+        working-directory: studio
+        run: ./gradlew --no-daemon :app:assembleDebug --stacktrace
+
+      - name: Package generated source
+        run: |
+          cd studio
+          zip -r ../PvZ2-Mod-Studio-Source.zip . \
+            -x ".gradle/*" ".kotlin/*" "app/build/*" "build/*"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: PvZ2-Mod-Studio-APK
+          path: studio/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload source project
+        uses: actions/upload-artifact@v4
+        with:
+          name: PvZ2-Mod-Studio-Source
+          path: PvZ2-Mod-Studio-Source.zip
+          if-no-files-found: error
+          retention-days: 14
